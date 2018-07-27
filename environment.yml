@@ -1,4 +1,4 @@
-name: JenniferPayne
+name: Microfluidics
 channels:
   - defaults
   - conda-forge
