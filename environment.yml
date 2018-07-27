@@ -1,4 +1,4 @@
-name: Microfluidics
+name: microfluidics
 channels:
   - defaults
   - conda-forge
