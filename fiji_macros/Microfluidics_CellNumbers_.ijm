@@ -1,6 +1,6 @@
 #@ File (label = "Input directory", style = "directory") input
 #@ File (label = "Output directory", style = "directory") output
-#@ String (label = "string arg", value=".tif") suffix
+#@ String (label = "File extension", value=".nd2") suffix
 #@ String(label="Drift correction reference channel:",choices={"1	", "2	", "3	", "4	"},value="1	",style="radioButtonHorizontal") reference_channel
 #@ Boolean (label = "Multi time scale computatation (slow!)", value = false) multi_time_scale
 #@ Boolean (label = "Sub pixel drift correction (for slow drifts)", value = false) sub_pixel
