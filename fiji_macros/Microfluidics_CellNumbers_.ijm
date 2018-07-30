@@ -23,38 +23,39 @@ function processFolder(input) {
 		if(File.isDirectory(input + File.separator + list[i]))
 			processFolder(input + File.separator + list[i]);
 		if(endsWith(list[i], suffix))
-			processFile(input, output, list[i]);
+			filename = input + File.separator + list[i];
+			processFile(filename);
 	}
 }
 
-function processFile(input, output, file) {
-	print("Reading image: " + input + File.separator + file);
-	open(input + File.separator + file);
-	wait(4000);
-	//waitForUser("Has the image been read in yet?");
-	selectWindow(file);
-	id = getImageID();
-	processImage(id);
-}
+//function processFile(input, output, file) {
+//	print("Reading image: " + input + File.separator + file);
+//	//open(input + File.separator + file);
+//	filename = input + File.separator + file;
+//	id = processFile(filename);
+//	wait(4000);
+//	//waitForUser("Has the image been read in yet?");
+//	processImage(id);
+//}
 
-//// function to scan folder to find files with correct suffix
-//function processFile(filename) {
-//	print("Processing: " + filename);
-//	for (i = 1; i < 1000; i++) {
-//		print("Reading in image series " + d2s(i, 0) + " with BioFormats...");
-//		arg_series = "series_" + toString(i);
-//		run("Bio-Formats Importer",
-//			"open=[" + filename + "] " +
-//			"color_mode=Default " +
-//			"rois_import=[ROI manager] " +
-//			"view=Hyperstack " +
-//			"stack_order=XYCZT " +
-//			"use_virtual_stack " +
-//			arg_series);
-//		id = getImageID();
-//		processImage(id);
-//		run("Collect Garbage");
-//	}
+// function to scan folder to find files with correct suffix
+function processFile(filename) {
+	print("Processing: " + filename);
+	for (i = 1; i < 1000; i++) {
+		print("Reading in image series " + d2s(i, 0) + " with BioFormats...");
+		arg_series = "series_" + toString(i);
+		run("Bio-Formats Importer",
+			"open=[" + filename + "] " +
+			"color_mode=Default " +
+			"rois_import=[ROI manager] " +
+			"view=Hyperstack " +
+			"stack_order=XYCZT " +
+			"use_virtual_stack " +
+			arg_series);
+		id = getImageID();
+		processImage(id);
+		run("Collect Garbage");
+	}
 }
 
 function processImage(id) {
