@@ -130,5 +130,6 @@ dependencies:
     - podocytes==0.0.1.dev0
     - psutil==5.4.5
     - wxpython==4.0.1
+    - napari==0.0.8
 prefix: /Users/genevieb/anaconda/envs/JenniferPayne
 
