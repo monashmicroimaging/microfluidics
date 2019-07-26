@@ -1,6 +1,7 @@
 import imreg
 import numpy as np
 from skimage import transform
+from concurrent.futures import ThreadPoolExecutor
 
 def stabilize_getshifts(im):
     """get shifts for sequence
@@ -11,8 +12,9 @@ def stabilize_getshifts(im):
         finds the pairwise shifts
     returns np.array of shifts
     """
-    shifts= map(lambda n: imreg.translation(im[n,...], im[n+1,...]), range(im.shape[0]-1))
-    shifts=[[0,0]] + list(shifts)
+    with ThreadPoolExecutor() as p:
+        shifts= list(p.map(lambda n: imreg.translation(im[n,...], im[n+1,...]), range(im.shape[0]-1)))
+    shifts=[[0,0]] + shifts
     return np.array(shifts)
 
 def stabilize_apply_shifts(seq, shifts):
