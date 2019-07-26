@@ -3,7 +3,7 @@ import numpy as np
 from skimage import transform
 from concurrent.futures import ThreadPoolExecutor
 
-def stabilize_getshifts(im, workers=1):
+def stabilize_getshifts(im):
     """get shifts for sequence
     
     Parameters
@@ -13,7 +13,7 @@ def stabilize_getshifts(im, workers=1):
     returns np.array of shifts
     """
     with ThreadPoolExecutor() as p:
-            shifts= list(p.map(lambda n: imreg.translation(im[n,...], im[n+1,...]), range(im.shape[0]-1)))
+        shifts= list(p.map(lambda n: imreg.translation(im[n,...], im[n+1,...]), range(im.shape[0]-1)))
     shifts=[[0,0]] + shifts
     return np.array(shifts)
 
