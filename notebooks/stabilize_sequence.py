@@ -1,5 +1,6 @@
 import imreg
 import numpy as np
+from skimage import transform
 
 def stabilize_getshifts(im):
     """get shifts for sequence
