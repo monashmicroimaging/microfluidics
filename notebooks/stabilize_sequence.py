@@ -63,7 +63,9 @@ def stabilize_apply_shifts(seq, shifts):
     padded_shape =  [nt, nc] + list(np.array([ny,nx])+enlarge_shape_by)
     padded_series = np.zeros(padded_shape, dtype=seq.dtype)
     for i, d in enumerate(cumulative_shifts):
-        padded_series[i, 0:1, d[0]:d[0]+ny, d[1]:d[1]+nx] = seq[i,  ...]
+        #padded_series[i, 0:1, d[0]:d[0]+ny, d[1]:d[1]+nx] = seq[i,  ...]
+
+        padded_series[i, :, d[0]:d[0]+ny, d[1]:d[1]+nx] = seq[i,  ...]
     if input_is_single_ch:
         return padded_series[:,0,...]
     else:
