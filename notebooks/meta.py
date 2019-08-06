@@ -36,6 +36,21 @@ def channel_metadata(series_filename,
     timepoints_ms : list of float, or None
         The timepoint of each image in the series, in ms. Is None if
         ``return_timepoints`` is False.
+
+    Examples
+    --------
+    >>> filename = ('/scratch/dk49/eggs/2018_MarchtoMay Microfluidics '
+    ...             'rawdata/20180503 JenEggLinkerCurve_s10.tif')
+    >>> seriesid, stage_coords, channel_info, _ = channel_metadata(filename)
+    >>> seriesid
+    10
+    >>> n_channels = len(channel_info)
+    >>> n_channels
+    2
+    >>> channel_info[0]['name']
+    'Q-DAPI'
+    >>> channel_info[1]
+    {'name': 'BF', 'emission_nm': 640.0, 'rgb_value': (1.0, 1.0, 1.0)}
     """
     series_filename = os.path.abspath(series_filename)
     original_filename = series_filename.replace(scratch_prefix,
