@@ -4,7 +4,7 @@ from skimage.filters import gaussian
 from skimage.util import img_as_ubyte
 from skimage.draw import circle
 
-SIZE_CHAMBER = 160
+SIZE_CHAMBER = 165
 MIN_SPACING = 350
 
 # simple difference of gaussian
@@ -34,8 +34,8 @@ def detect_circles(im, canny1=30, canny2=50):
     gradient = gradient.astype(np.uint8)
     # find cirecles via hough transform
     circles = cv2.HoughCircles(gradient,cv2.HOUGH_GRADIENT,1, MIN_SPACING,
-         param1=canny1, param2=canny2, minRadius=int(SIZE_CHAMBER*.85), 
-         maxRadius=int(SIZE_CHAMBER*1.15))
+         param1=canny1, param2=canny2, minRadius=int(SIZE_CHAMBER*.95), 
+         maxRadius=int(SIZE_CHAMBER*1.06))
     print(f"found circles {circles}")
     # Create label image
     circles = np.uint16(np.around(circles))
