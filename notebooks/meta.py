@@ -46,8 +46,7 @@ def channel_metadata(series_filename,
     image.iter_axes = 't'
     series_id = int(match.group('seriesid'))
     im.default_coords['m'] = series_id
-    channel_keys = sorted(k for k in im.metadata.keys()
-                          if k.startswith('plane_'))
+    channel_keys = [f'plane_{i}' for i in range(im.metadata['plane_count'])]
     channel_info = [{k: im.metadata[chk][k]
                      for k in ['name', 'emission_nm', 'rgb_value']}
                     for chk in channel_keys]
