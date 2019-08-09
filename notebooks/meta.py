@@ -61,14 +61,14 @@ def channel_metadata(series_filename,
     image.iter_axes = 't'
     series_id = int(match.group('seriesid'))
     im.default_coords['m'] = series_id
-    channel_keys = [f'plane_{i}' for i in range(im.metadata['plane_count'])]
-    channel_info = [{k: im.metadata[chk][k]
+    channel_keys = [f'plane_{i}' for i in range(image.metadata['plane_count'])]
+    channel_info = [{k: image.metadata[chk][k]
                      for k in ['name', 'emission_nm', 'rgb_value']}
                     for chk in channel_keys]
-    stage_coords = {k: im[0].metadata[k] for k in ['x_um', 'y_um']}
+    stage_coords = {k: image[0].metadata[k] for k in ['x_um', 'y_um']}
     if return_timepoints:
-        n_timepoints = len(im)
-        timepoints_ms = [im[i].metadata['t_ms'] for i in range(n_timepoints)]
+        n_timepoints = len(image)
+        timepoints_ms = [image[i].metadata['t_ms'] for i in range(n_timepoints)]
     else:
         timepoints_ms = None
     return series_id, stage_coords, channel_info, timepoints_ms

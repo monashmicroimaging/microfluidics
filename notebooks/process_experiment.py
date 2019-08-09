@@ -1,14 +1,18 @@
 import numpy as np
 import tifffile
 import matplotlib.pyplot as plt
-from .stabilize_sequence import stabilize_getshifts, stabilize_apply_shifts, stabilize_crop_to_overlap
-from .detect_and_label_chambers import detect_circles
+from stabilize_sequence import stabilize_getshifts, stabilize_apply_shifts, stabilize_crop_to_overlap
+from detect_and_label_chambers import detect_circles
 from skimage.measure import label, regionprops_table
 from skimage.color import label2rgb
+from skimage.filters import gaussian
 import skimage.filters
 import skimage.morphology
 import pathlib
 from typing import Dict, Optional, Tuple
+from functools import partial
+from scipy.ndimage import find_objects
+from concurrent.futures import ThreadPoolExecutor
 
 def process_folder(folder: pathlib.Path):
     """[summary]
@@ -49,8 +53,20 @@ def bg_estimate_initial(timeseq: np.ndarray):
     and is what I would anticipate for this type of experiment. BUT THIS
     NEEDS TO BE KEPT IN MIND !!!
     """
-    return skimage.filters.gaussian(np.min(timeseq, axis=0))
+    return gaussian(np.min(timeseq, axis=0))
 
+def subtract_mask_median_bg(seq: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """for each frame of a time seq, subtract the median intensity in the mask
+    
+    Arguments:
+        seq {np.ndarray} -- time seq (t, y, x)
+        mask {np.ndarray} -- mask (y,x)
+    
+    Returns:
+        np.ndarray -- 
+    """
+    subtracted_frames = map(lambda frame: frame-np.median(frame[mask], seq))
+    return np.array(list(subtracted_frames))
 
 def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_by: int=20) -> Tuple[np.ndarray, np.ndarray]:
     """given a time series of dapi images, calculate labels and background mask
@@ -67,30 +83,41 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_
     Also the nuclei areas will be dilated and then inverted to create a mask of the background.
     The resulting label sequence and background mask binary sequence are returned as a tuple
     """
-
     labels = np.zeros(dapiseq.shape, dtype=np.uint16)
     masks = np.zeros(dapiseq.shape, dtype=np.bool)
     def process_frame(i):
-        th = skimage.filters.threshold_otsu(dapiseq[i,...])
+        frame = dapiseq[i, ...]
+        #frame = gaussian(frame)
+        th = skimage.filters.threshold_otsu(frame)
         if min_thresh is not None:
             th = max(th, min_thresh)
-        cellmask = dapiseq[i, ...] > th
+        cellmask = frame > th
         dilated_mask = skimage.morphology.dilation(cellmask, skimage.morphology.disk(dilate_by))
         bg = ~dilated_mask
         # TODO see whether we observe
         # any clumping and implement distance-transform-based splitting
         # if necessary
-        labeled_frame = label(cellmask)
-        labels[i, ...] = labeled_frame
+        labelled_frame = label(cellmask)
+        labels[i, ...] = labelled_frame
         masks[i, ...] = bg
         return(i)
 
-    # using a map and a nested function may look odd,
-    # but should allow replacing map with a ThreadPool().map
-    # for multithreaded performance. More elegant suggestions welcome. 
-    res = list(map(process_frame, range(dapiseq.shape[0])))
+    # using a map and a nested function may look odd here
+    # but should allow for replacing map with ThreadPool().map
+    # in the future for multithreaded performance. 
+    # More elegant suggestions welcome. 
+    with ThreadPoolExecutor() as p:
+        res = list(p.map(process_frame, range(dapiseq.shape[0])))
     return labels, masks
 
+
+def create_overlay(int_channels, label_channels, outline_channels):
+    # TODO 
+    # this is just a placeholder
+    # create a generic function to create rgb overlays 
+    #
+    # may just implement something specific to the task here
+    pass
 
 def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str], output_overlay = Optional[str]):
     """Provided an input image sequence correspoding to a time series at a given position perform
@@ -133,10 +160,17 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
     seq = stabilize_apply_shifts(seq, shifts)
     seq = stabilize_crop_to_overlap(seq)
 
+    for i in range(seq.shape[1]):
+        plt.imshow(np.median(seq[:,i,...], axis=0))
+        plt.show()
+
     # Detect egg chambers
     # take pixel-wise median (over time) to remove moving cells
-    bf_median = np.median(seq[:,ch_bf,...], axis=2)
+    bf_median = np.median(seq[:,ch_bf,...], axis=0)
     chamber_labels = detect_circles(bf_median)
+
+    plt.imshow(chamber_labels)
+    plt.show()
 
     # first round of background subtraction
     # apply to all fluorescence channels
@@ -144,53 +178,55 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
     all_channels = tuple(range(seq.shape[1]))
     fluo_channels = tuple(set(all_channels) - set([ch_bf]))
 
-    bg_corr = list(map(lambda ch: seq[:, ch, ...] - bg_estimate_intial(seq[:,ch,...], fluo_channels)))
+    with ThreadPoolExecutor() as p:
+        print("performing initial background correction")
+        bg_corr = list(p.map(lambda ch: gaussian(seq[:, ch, ...]) - bg_estimate_initial(seq[:,ch,...]), fluo_channels))
+        print(len(bg_corr))
+        print(bg_corr[0].shape)
 
-    # single out dapi channel for nuclei segmentation
-    bg_corr_dapi = bg_corr[fluo_channels.index(ch_dapi)]
+        # single out dapi channel for nuclei segmentation
+        print("segmeting nuclei ...")
+        bg_corr_dapi = bg_corr[fluo_channels.index(ch_dapi)]
+        labels, bg_mask = segment_cells(bg_corr_dapi)
+
+        # TODO add tqdm progress bars for the maps
+        
+        # refined, per-frame background estimate (for each frame, remove
+        # median intensity in background mask).
+        correct_frame = lambda frame, mask: frame-np.median(frame[mask])
+        correct_ch = lambda ch: np.array(list(map(correct_frame, zip(ch, bg_mask))))
+        bg_corr_refined = list(map(correct_ch, bg_corr_dapi))
+        
 
 
     
 
-    # for each fluorescence channel (use a map)
-    #    smooth
-    #    find per-pixel min over time as initial background estimate
-    #    subtract per-pixel min 
-
-    # segment and label cells in DAPI channel. Return mask and label image
-    # create mask of background areas by dilating cell maks and inverting
-    # for each fluorescence channel
-    #     calc median intensity of background area and subtract to obtain final bgcorrected intensity image
     # concatenate
     #    for [each bgcorrected fluorescence channel] + [egg chamber label image]:
     #         calc desired regionprops
     #         rename regionprop columns (prepend_channel)
+    p = ('label', 'centroid', 'max_intensity', 'mean_intensity', 'min_intensity', 'area')
+    objects_seq = list(map(find_objects, labels)) # we want to re-use the objects for each ch
+    measure_frame = lambda l, insty, o: regionprops_table(l, insty, properties=p, objects=o)
+    measure_ch = lambda ch: np.array(measure_frame, zip(labels, ch))
+    measurements = list(map(measure_ch, bg_corr_refined))
+    
+    
+    return measurements # just an early exit point while debugging
+    # add 'timepoint' to each dict
+
+    # add 'metadata' to each dict
+
+    
     # add a metadata column that gives the total size of the mask to which the cell belongs
     # this will allow filtering out cells that were in egg chambers that were not fully in the field of view
     # and for the background mask it records the areas outside of the egg chambers after cropping (small caveat:
     # the chambers are actually larger than the cirlces)
+
+    # combine list of dicts into a pd Dataframe
+
     # generate output_csv filename from input filename unless provided
     # write csv
     # generate output_overlay filename/s from overlay filename unless provided
     # write image series (png/jpg)
     # return 
-
-    pass
-    
-
-def segment_cells(im: np.ndarray) -> np.ndarray:
-    """[summary]
-    
-    Parameters
-    ----------
-    im : np.ndarray
-        Input image (cell nuclei with a fluorescent marker)
-    
-    Returns
-    -------
-    np.ndarray
-        label image
-    """
-    pass
-
-
