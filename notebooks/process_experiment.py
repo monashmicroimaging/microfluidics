@@ -13,6 +13,8 @@ from typing import Dict, Optional, Tuple
 from functools import partial
 from scipy.ndimage import find_objects
 from concurrent.futures import ThreadPoolExecutor
+from itertools import product, repeat
+import pandas as pd
 
 def process_folder(folder: pathlib.Path):
     """[summary]
@@ -39,7 +41,7 @@ def process_folder(folder: pathlib.Path):
     pass
 
 
-def bg_estimate_initial(timeseq: np.ndarray):
+def bg_estimate_initial(timeseq: np.ndarray, sigma=3):
     """generate an initial background estimate based on the minimun intensity
     seen for each pixel over time. 
     
@@ -53,7 +55,7 @@ def bg_estimate_initial(timeseq: np.ndarray):
     and is what I would anticipate for this type of experiment. BUT THIS
     NEEDS TO BE KEPT IN MIND !!!
     """
-    return gaussian(np.min(timeseq, axis=0))
+    return gaussian(np.min(timeseq, axis=0), sigma)
 
 def subtract_mask_median_bg(seq: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """for each frame of a time seq, subtract the median intensity in the mask
@@ -87,11 +89,16 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_
     masks = np.zeros(dapiseq.shape, dtype=np.bool)
     def process_frame(i):
         frame = dapiseq[i, ...]
-        #frame = gaussian(frame)
+        # frame = gaussian(frame, 3)
+        # plt.imshow(frame)
+        # plt.show()
         th = skimage.filters.threshold_otsu(frame)
         if min_thresh is not None:
             th = max(th, min_thresh)
+        #print(f"threshold is {th}")
         cellmask = frame > th
+        #plt.imshow(cellmask)
+        #plt.show()
         dilated_mask = skimage.morphology.dilation(cellmask, skimage.morphology.disk(dilate_by))
         bg = ~dilated_mask
         # TODO see whether we observe
@@ -119,7 +126,32 @@ def create_overlay(int_channels, label_channels, outline_channels):
     # may just implement something specific to the task here
     pass
 
-def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str], output_overlay = Optional[str]):
+def process_measurements(measurements, fluo_channels):
+    outer = []
+    for ch_number, ch_measurements in zip(fluo_channels, measurements):
+        inner = []
+        for i,m in enumerate(ch_measurements):
+            tmp = pd.DataFrame(m)
+            tmp["timepoint"] = i
+            #tmp["ch"] = ch_i
+            inner.append(tmp)
+        ch_df = pd.concat(inner)
+        ch_df = ch_df.rename(columns = lambda cname: cname  if cname in  ("timepoint", "label") else f"ch_{ch_number}_{cname}")
+        outer.append(ch_df)
+    return outer # TODO: change to horizontal concatenation
+    
+def process_measurements_old(measurements):
+    ms = []
+    for ch_number, ch_measurements in enumerate(measurements):
+        for i,m in enumerate(ch_measurements):
+            tmp = pd.DataFrame(m)
+            tmp["timepoint"] = i
+            tmp["ch"] = ch_i
+            ms.append(tmp)
+    return pd.concat(ms)
+    
+
+def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str], output_overlay = Optional[str], sigma: int=3):
     """Provided an input image sequence correspoding to a time series at a given position perform
     egg chamber detection/segmentation/ 
 
@@ -130,10 +162,12 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
         input filename
     metadata : Dict
         dictionary that contains metadata which should be added to output table
-    output_csv : [type], optional
+    output_csv : [str], optional
         file name for the output csv file, will be generated automatically based on input_tif if None
-    output_overlay : [type], optional
+    output_overlay : [str], optional
         file name for the segmentation results,  will be generated automatically based on input_tif if None
+    sigma: [int]: 
+        passed on to gaussian smoothing
     """
     
     seq = tifffile.imread(input_tif)
@@ -142,7 +176,20 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
         seq = seq[0, ... ]
     assert seq.ndim == 4
 
-    
+    ##################
+    # TODO: REMOVE !!!!!!!!!!! 
+    # for debugging only ... create an additional fluorescence channel by copying dapi
+    # this is because I don't have a suitbale multi-channel image on my laptop
+    seq = seq[:5,...]
+    shape = list(seq.shape)
+    shape[1] = shape[1] + 1
+    tmp = np.zeros(shape, dtype = seq.dtype)
+    for i in range(shape[0]):
+        for j in (0,1):
+            tmp[i, j, ... ] = seq[i,j,...]
+        tmp[i,2] = seq[i,1,...]
+    seq=tmp.copy()
+
     # determine channels based on metadata
     # fill in later 
     # we definitely need DAPI channel for nuclei and brightfield 
@@ -178,52 +225,91 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
     all_channels = tuple(range(seq.shape[1]))
     fluo_channels = tuple(set(all_channels) - set([ch_bf]))
 
-    with ThreadPoolExecutor() as p:
-        print("performing initial background correction")
-        bg_corr = list(p.map(lambda ch: gaussian(seq[:, ch, ...]) - bg_estimate_initial(seq[:,ch,...]), fluo_channels))
-        print(len(bg_corr))
-        print(bg_corr[0].shape)
+    print(f"all channes {all_channels}")
+    print(f"fluo channels {fluo_channels}")
 
-        # single out dapi channel for nuclei segmentation
+    with ThreadPoolExecutor() as p:
+        #################################
+        #  Initial Background Estimation
+        # 
+        print("performing initial background correction")
+        bg_corr = list(p.map(lambda ch: gaussian(seq[:, ch, ...],sigma) - bg_estimate_initial(seq[:,ch,...], sigma), fluo_channels))
+
+        ################################
+        # Segment Nuclei in DAPI channel
+        #
         print("segmeting nuclei ...")
         bg_corr_dapi = bg_corr[fluo_channels.index(ch_dapi)]
+        #for i, tmpim  in enumerate(bg_corr_dapi):
+        #    print(f"bg_corr_dapi {i}")
+        #    plt.imshow(tmpim)
+        #    plt.show()
         labels, bg_mask = segment_cells(bg_corr_dapi)
 
-        # TODO add tqdm progress bars for the maps
-        
-        # refined, per-frame background estimate (for each frame, remove
+        #################################################
+        # Per-frame refinemant of background subtraction, 
+        # 
+        # (for each frame, remove
         # median intensity in background mask).
-        correct_frame = lambda frame, mask: frame-np.median(frame[mask])
-        correct_ch = lambda ch: np.array(list(map(correct_frame, zip(ch, bg_mask))))
-        bg_corr_refined = list(map(correct_ch, bg_corr_dapi))
+        # After this, the median intensity of the background
+        # is 0 by construction.
+        print("refining background correction estimation")
+        def correct_frame(intuple):
+            frame, mask = intuple
+            bgval = np.median(frame[mask])
+            return frame - bgval
+        correct_ch = lambda ch: np.array(list(p.map(correct_frame, zip(ch, bg_mask))))
+        bg_corr_refined = list(p.map(correct_ch, bg_corr))
+        
+        ############################################################################
+        # Feature extraction : measure intensity statistics in fluorescence channels
+        # 
+        # TODO: add other metrics as needed (e.g. std deviation)
+        print("Calculating intensity statistics")
+        props_intensity = ('label', 'centroid', 'max_intensity', 'mean_intensity', 'min_intensity', 'area')
+        objects_seq = list(map(find_objects, labels)) # we want to re-use the objects for each ch
+        def measure_frame(intuple, props):
+            l, intensity, obs = intuple
+            return regionprops_table(l, intensity, properties=props,objects=obs)
+
+        measure_frame_int = partial(measure_frame, props=props_intensity)
+        measure_ch = lambda ch: np.array(list(p.map(measure_frame_int, zip(labels, ch, objects_seq))))
+        measurements_intensity = list(p.map(measure_ch, bg_corr_refined))
+        tmp = process_measurements(measurements_intensity, fluo_channels) # modify column names to reflect channel
+        
+        ######################################
+        # Merge tables for different channels
+        # 
+        merged = pd.merge(tmp[0], tmp[1], how = "outer",on=('label','timepoint'))
+        
+        ################################################################
+        # Determine location of each cell (egg chamber or background)
+        #
+        # In order to figure out which egg chamber a cell belongs to we simply measure the 
+        # intensity for each cell label in the chamber label image.  
+        # Max intensity will do here, we only need the single readout
+        props_mask = ('label', 'max_intensity')
+        measure_frame_mask = partial(measure_frame, props=props_mask)
+        measure_mask = np.array(list(p.map(measure_frame_mask, zip(labels, repeat(chamber_labels) , objects_seq))))
+        # add egg chamber label as column to merged data frame
+        merged = merged.assign(eggchamber=pd.concat(map(pd.DataFrame, measure_mask))["max_intensity"].astype(np.int).values)
+        merged["filename"] = input_tif
+        # add area in pixels for each egg chamber
+        # as we know the approximate radius and area of each chamber
+        # this will allow filtering for egg chambers that are only partially in
+        # the field of view
+        chamber_sizes = {} # build a dictionary to help translate between chamber label and area
+        for chamber in merged["eggchamber"].unique():   
+            area_pixels=np.sum(chamber_labels==chamber)
+            chamber_sizes[chamber]=area_pixels
+        merged["chamberarea"] = merged["eggchamber"].apply(lambda x: chamber_sizes[x])
         
 
-
-    
-
-    # concatenate
-    #    for [each bgcorrected fluorescence channel] + [egg chamber label image]:
-    #         calc desired regionprops
-    #         rename regionprop columns (prepend_channel)
-    p = ('label', 'centroid', 'max_intensity', 'mean_intensity', 'min_intensity', 'area')
-    objects_seq = list(map(find_objects, labels)) # we want to re-use the objects for each ch
-    measure_frame = lambda l, insty, o: regionprops_table(l, insty, properties=p, objects=o)
-    measure_ch = lambda ch: np.array(measure_frame, zip(labels, ch))
-    measurements = list(map(measure_ch, bg_corr_refined))
-    
-    
-    return measurements # just an early exit point while debugging
-    # add 'timepoint' to each dict
+    return merged # TODO: remove - just an early exit debugging while building this function
 
     # add 'metadata' to each dict
 
     
-    # add a metadata column that gives the total size of the mask to which the cell belongs
-    # this will allow filtering out cells that were in egg chambers that were not fully in the field of view
-    # and for the background mask it records the areas outside of the egg chambers after cropping (small caveat:
-    # the chambers are actually larger than the cirlces)
-
-    # combine list of dicts into a pd Dataframe
 
     # generate output_csv filename from input filename unless provided
     # write csv
