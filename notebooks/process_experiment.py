@@ -118,12 +118,12 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_
     return labels, masks
 
 
-def create_overlay(int_channels, label_channels, outline_channels):
-    # TODO 
-    # this is just a placeholder
-    # create a generic function to create rgb overlays 
-    #
-    # may just implement something specific to the task here
+def create_RGB_sequence(red_seq: np.ndarray, green_seq:np.ndarray, blue_seq:np.ndarray, input_ranges) -> np.ndarray:
+    
+    pass
+
+def overlay_outlines_sequence(rgb_seq, label_seq, colors) -> np.ndarray:
+
     pass
 
 def process_measurements(measurements, fluo_channels):
@@ -180,7 +180,7 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
     # TODO: REMOVE !!!!!!!!!!! 
     # for debugging only ... create an additional fluorescence channel by copying dapi
     # this is because I don't have a suitbale multi-channel image on my laptop
-    seq = seq[:5,...]
+    seq = seq[:,...]
     shape = list(seq.shape)
     shape[1] = shape[1] + 1
     tmp = np.zeros(shape, dtype = seq.dtype)
@@ -207,12 +207,12 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
     seq = stabilize_apply_shifts(seq, shifts)
     seq = stabilize_crop_to_overlap(seq)
 
-    for i in range(seq.shape[1]):
-        plt.imshow(np.median(seq[:,i,...], axis=0))
-        plt.show()
-
-    # Detect egg chambers
-    # take pixel-wise median (over time) to remove moving cells
+    ##########################################
+    # Detect egg chambers  
+    #
+    # clean up brightfield image first by
+    # taking the pixel-wise median (over time) 
+    # to remove moving cells
     bf_median = np.median(seq[:,ch_bf,...], axis=0)
     chamber_labels = detect_circles(bf_median)
 
@@ -291,22 +291,27 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
         props_mask = ('label', 'max_intensity')
         measure_frame_mask = partial(measure_frame, props=props_mask)
         measure_mask = np.array(list(p.map(measure_frame_mask, zip(labels, repeat(chamber_labels) , objects_seq))))
-        # add egg chamber label as column to merged data frame
-        merged = merged.assign(eggchamber=pd.concat(map(pd.DataFrame, measure_mask))["max_intensity"].astype(np.int).values)
-        merged["filename"] = input_tif
-        # add area in pixels for each egg chamber
-        # as we know the approximate radius and area of each chamber
-        # this will allow filtering for egg chambers that are only partially in
-        # the field of view
-        chamber_sizes = {} # build a dictionary to help translate between chamber label and area
-        for chamber in merged["eggchamber"].unique():   
-            area_pixels=np.sum(chamber_labels==chamber)
-            chamber_sizes[chamber]=area_pixels
-        merged["chamberarea"] = merged["eggchamber"].apply(lambda x: chamber_sizes[x])
+    # add egg chamber label as column to merged data frame
+    merged = merged.assign(eggchamber=pd.concat(map(pd.DataFrame, measure_mask))["max_intensity"].astype(np.int).values)
+    merged["filename"] = input_tif
+    # add area in pixels for each egg chamber
+    # as we know the approximate radius and area of each chamber
+    # this will allow filtering for egg chambers that are only partially in
+    # the field of view
+    chamber_sizes = {} # build a dictionary to help translate between chamber label and area
+    for chamber in merged["eggchamber"].unique():   
+        area_pixels=np.sum(chamber_labels==chamber)
+        chamber_sizes[chamber]=area_pixels
+    merged["chamberarea"] = merged["eggchamber"].apply(lambda x: chamber_sizes[x])
         
 
-    return merged # TODO: remove - just an early exit debugging while building this function
+    ##########################
+    # Create overlays
+    ##########################
 
+    #create_RGB_sequence()
+    result = {"measurements" : merged, "seq" : seq, "cell_label_seq": labels, "chamber_labels": chamber_labels }
+    return result
     # add 'metadata' to each dict
 
     
