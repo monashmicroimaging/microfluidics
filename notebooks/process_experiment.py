@@ -15,6 +15,82 @@ from scipy.ndimage import find_objects
 from concurrent.futures import ThreadPoolExecutor
 from itertools import product, repeat
 import pandas as pd
+from skimage.color import gray2rgb
+from skimage.exposure import rescale_intensity
+
+from skimage.morphology import dilation, erosion, disk
+from cv2 import VideoWriter, VideoWriter_fourcc
+
+
+def contour_from_label_single_frame(label: np.ndarray) -> np.ndarray: 
+    """Creates a boolean mask with label contours
+
+    Arguments:
+        label {np.ndarray} -- label image as ndarray
+
+    Returns:
+        np.ndarray -- boolean area in which the contours around labels are true
+
+    Note: these contours extend into and out of the label, i.e. they are
+    not useful for very thin objects.
+    """
+    return (dilation(label,disk(1))-erosion(label,disk(1)))>0
+
+def  get_random_colors(n_entries=256, zero="white"):
+    tmp = np.random.rand(n_entries,3)
+    # set first entry to white or black if requested:
+    if zero == "white":
+        tmp[0,:] = (1, 1, 1)
+    elif zero == "black":
+        tmp[0,:] = (0, 0, 0)
+    return tmp
+
+def create_overlay_sequence(label_seq: np.ndarray, im_seq: np.ndarray, chamber_labels: Optional[np.ndarray]=None) -> np.ndarray:
+    """Creates a sequence of overlays with cells as colored labels on im_seq. Chambers as outlines.
+    
+    Arguments:
+        label_seq {np.ndarray} -- sequence of object label images [nt, ny, nx]
+        im_seq {np.ndarray} -- sequence of image on which to overlay the labels [nt, ny, nx]
+    
+    Keyword Arguments:
+        chamber_labels {Optional[np.ndarray]} -- label image with egg_chambers(for outlines) (default: {None})
+    
+    Returns:
+        np.ndarray -- [nt, ny, nx, 3] color image sequence with overlays
+
+        
+    """
+    def label_cells(l):
+        label,im = l
+        rcolors = get_random_colors()
+        return label2rgb(label, im, bg_label=0, bg_color=None,alpha=0.3, colors=rcolors, kind='overlay')
+
+    with ThreadPoolExecutor() as p:
+        overlay = np.array(list(p.map(label_cells, zip(label_seq, im_seq))))
+
+    if chamber_labels is not None:
+        c = contour_from_label_single_frame(eggs)
+        overlay[:,c,:] = (1.0,1.0,1.0)
+
+    return overlay
+
+
+def save_seq_as_avi(seq: np.ndarray, filename: str, fps: int=3):
+    """Saves seq as an avi movie
+    
+    Arguments:
+        seq {np.ndarray} -- numpy nd.array float type with range 0.0,1.0 and shape [nt, ny, nx, 3]  
+        filename {str} -- filename of the output avi file
+    
+    Keyword Arguments:
+        fps {int} -- frames per second (default: {3})
+    """
+    height, width = seq[0,...,0].shape
+    size=(width,height)
+    out = VideoWriter(filename, VideoWriter_fourcc(*'DIVX'), fps, size)
+    for im in seq:
+        out.write((255*im[:,:,:]).astype(np.uint8))
+    out.release()
 
 def process_folder(folder: pathlib.Path):
     """[summary]
@@ -95,8 +171,8 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_
         th = skimage.filters.threshold_otsu(frame)
         if min_thresh is not None:
             th = max(th, min_thresh)
-        #print(f"threshold is {th}")
-        cellmask = frame > th
+        print(f"threshold for frame {i} is {th}")
+        cellmask = frame > th 
         #plt.imshow(cellmask)
         #plt.show()
         dilated_mask = skimage.morphology.dilation(cellmask, skimage.morphology.disk(dilate_by))
@@ -180,7 +256,7 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
     # TODO: REMOVE !!!!!!!!!!! 
     # for debugging only ... create an additional fluorescence channel by copying dapi
     # this is because I don't have a suitbale multi-channel image on my laptop
-    seq = seq[:,...]
+    seq = seq[:40,...]
     shape = list(seq.shape)
     shape[1] = shape[1] + 1
     tmp = np.zeros(shape, dtype = seq.dtype)
