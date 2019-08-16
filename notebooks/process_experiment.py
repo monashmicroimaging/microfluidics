@@ -1,24 +1,22 @@
 import numpy as np
+import pathlib
 import tifffile
 import matplotlib.pyplot as plt
 from stabilize_sequence import stabilize_getshifts, stabilize_apply_shifts, stabilize_crop_to_overlap
 from detect_and_label_chambers import detect_circles
 from skimage.measure import label, regionprops_table
 from skimage.color import label2rgb
-from skimage.filters import gaussian
-import skimage.filters
-import skimage.morphology
-import pathlib
+from skimage.filters import gaussian, threshold_otsu, threshold_li
+from skimage.exposure import rescale_intensity
+from skimage.morphology import dilation, erosion, disk
+from skimage.color import gray2rgb
+from skimage.exposure import rescale_intensity
 from typing import Dict, Optional, Tuple
 from functools import partial
 from scipy.ndimage import find_objects
 from concurrent.futures import ThreadPoolExecutor
 from itertools import product, repeat
 import pandas as pd
-from skimage.color import gray2rgb
-from skimage.exposure import rescale_intensity
-
-from skimage.morphology import dilation, erosion, disk
 from cv2 import VideoWriter, VideoWriter_fourcc
 
 
@@ -36,7 +34,8 @@ def contour_from_label_single_frame(label: np.ndarray) -> np.ndarray:
     """
     return (dilation(label,disk(1))-erosion(label,disk(1)))>0
 
-def  get_random_colors(n_entries=256, zero="white"):
+
+def get_random_colors(n_entries=256, zero="white"):
     tmp = np.random.rand(n_entries,3)
     # set first entry to white or black if requested:
     if zero == "white":
@@ -44,6 +43,7 @@ def  get_random_colors(n_entries=256, zero="white"):
     elif zero == "black":
         tmp[0,:] = (0, 0, 0)
     return tmp
+
 
 def create_overlay_sequence(label_seq: np.ndarray, im_seq: np.ndarray, chamber_labels: Optional[np.ndarray]=None) -> np.ndarray:
     """Creates a sequence of overlays with cells as colored labels on im_seq. Chambers as outlines.
@@ -69,7 +69,7 @@ def create_overlay_sequence(label_seq: np.ndarray, im_seq: np.ndarray, chamber_l
         overlay = np.array(list(p.map(label_cells, zip(label_seq, im_seq))))
 
     if chamber_labels is not None:
-        c = contour_from_label_single_frame(eggs)
+        c = contour_from_label_single_frame(chamber_labels)
         overlay[:,c,:] = (1.0,1.0,1.0)
 
     return overlay
@@ -92,15 +92,17 @@ def save_seq_as_avi(seq: np.ndarray, filename: str, fps: int=3):
         out.write((255*im[:,:,:]).astype(np.uint8))
     out.release()
 
-def process_folder(folder: pathlib.Path):
-    """[summary]
+def process_folder(folder: pathlib.Path, basepath_tif: pathlib.Path, basepath_nd2: pathlib.Path):
+    """Finds all the .tif files in a folder and triggers the processing
     
     Parameters
     ----------
     folder : pathlib.Path
-        [description]
-    replace : [type], optional
-        [description], by default ("/scratch/"
+        relative Path to the folder, below basepath
+    basepath_tif : basepath for the tif files
+    basepath_nd2 : basepath for the corresponding nd2 files (from which the tif files
+                were created using bfconvert)
+
     """
     # find original nd2 file based on which folder has
     # been created with bfconvert (use string replacement)
@@ -168,14 +170,17 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_
         # frame = gaussian(frame, 3)
         # plt.imshow(frame)
         # plt.show()
-        th = skimage.filters.threshold_otsu(frame)
+        th = threshold_otsu(frame)
+        # alternative suggested by @jni
+        #initial_guess= np.quantile(frame, 0.99)
+        #th  = threshold_li(frame, initial_guess=initial_guess)
         if min_thresh is not None:
             th = max(th, min_thresh)
-        print(f"threshold for frame {i} is {th}")
+        # print(f"threshold for frame {i} is {th}") # debug code
         cellmask = frame > th 
-        #plt.imshow(cellmask)
+        #plt.imshow(cellmask) # debug code
         #plt.show()
-        dilated_mask = skimage.morphology.dilation(cellmask, skimage.morphology.disk(dilate_by))
+        dilated_mask = dilation(cellmask, disk(dilate_by))
         bg = ~dilated_mask
         # TODO see whether we observe
         # any clumping and implement distance-transform-based splitting
@@ -193,41 +198,74 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_
         res = list(p.map(process_frame, range(dapiseq.shape[0])))
     return labels, masks
 
-
-def create_RGB_sequence(red_seq: np.ndarray, green_seq:np.ndarray, blue_seq:np.ndarray, input_ranges) -> np.ndarray:
-    
-    pass
-
-def overlay_outlines_sequence(rgb_seq, label_seq, colors) -> np.ndarray:
-
-    pass
-
 def process_measurements(measurements, fluo_channels):
+    """helper function that combines measurements from 
+    individual time points, adds a timepoint column and 
+    prepends a string identifying the channel where a
+    measurement was taken.
+    Reslt is a list of dataframes, one per channel.
+    """
     outer = []
     for ch_number, ch_measurements in zip(fluo_channels, measurements):
         inner = []
         for i,m in enumerate(ch_measurements):
             tmp = pd.DataFrame(m)
             tmp["timepoint"] = i
-            #tmp["ch"] = ch_i
             inner.append(tmp)
         ch_df = pd.concat(inner)
         ch_df = ch_df.rename(columns = lambda cname: cname  if cname in  ("timepoint", "label") else f"ch_{ch_number}_{cname}")
         outer.append(ch_df)
-    return outer # TODO: change to horizontal concatenation
+    return outer # Should the data frame merging happen here ? (Currently in calling function)
     
-def process_measurements_old(measurements):
-    ms = []
-    for ch_number, ch_measurements in enumerate(measurements):
-        for i,m in enumerate(ch_measurements):
-            tmp = pd.DataFrame(m)
-            tmp["timepoint"] = i
-            tmp["ch"] = ch_i
-            ms.append(tmp)
-    return pd.concat(ms)
-    
+def process_timeseries(input_tif: str, metadata, output_csv: Optional[str]=None, output_overlay: Optional[str]=None):
+    """Process a single time series, write measurements to csv and overlay to MP4 
+       
+       Parameters
+        ----------
+       input_tif: [str], str with path to input tifffile.
+       metadata: [dict] ? metadate from the corresponding nd2 file
+       output_csv : [str], optional
+       file name for the output csv file, will be generated automatically based on input_tif if None
+       output_overlay : [str], optional
+       file name for the segmentation results,  will be generated automatically based on input_tif if None
+    """
 
-def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str], output_overlay = Optional[str], sigma: int=3):
+    #########################
+    # Call actual processing
+    #########################
+    print("Drift correction, circle detection and cell segmentation")
+    results = segment_and_measure_timeseries(input_tif, {})
+
+    ####################
+    # Save measurements
+    ####################
+    print("Saving csv")
+    if output_csv is None:
+        output_csv=input_tif.replace(".tif",".csv")
+    df = results["measurements"]
+    print(f"Saving measurements as {output_csv}")
+    df.to_csv(output_csv) #TODO catch PermissionError  and what else?
+
+    ######################################
+    # Create and save segemenation overlay
+    ######################################
+    if output_overlay is None:
+        output_overlay=input_tif.replace(".tif",".mp4")
+    
+    # rescale intensities
+    # TODO: extract from metadata and remove this section
+    bf_ch=1 
+    dapi_ch=0
+    bf_seq = rescale_intensity(results["seq"][:,bf_ch,...] ,out_range=np.uint8).astype(np.uint8)
+    dapi_seq = rescale_intensity(results["seq"][:,dapi_ch,...], out_range=np.uint8).astype(np.uint8)
+    label_seq = results["cell_label_seq"]
+    egg_chambers = results["chamber_labels"]
+    overlay = create_overlay_sequence(label_seq, bf_seq, egg_chambers)
+    save_seq_as_avi(overlay, output_overlay)
+
+    return results # pass results up, useful when using notebook
+
+def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3):
     """Provided an input image sequence correspoding to a time series at a given position perform
     egg chamber detection/segmentation/ 
 
@@ -238,10 +276,7 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
         input filename
     metadata : Dict
         dictionary that contains metadata which should be added to output table
-    output_csv : [str], optional
-        file name for the output csv file, will be generated automatically based on input_tif if None
-    output_overlay : [str], optional
-        file name for the segmentation results,  will be generated automatically based on input_tif if None
+   
     sigma: [int]: 
         passed on to gaussian smoothing
     """
@@ -256,7 +291,7 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
     # TODO: REMOVE !!!!!!!!!!! 
     # for debugging only ... create an additional fluorescence channel by copying dapi
     # this is because I don't have a suitbale multi-channel image on my laptop
-    seq = seq[:40,...]
+    #seq = seq[:40,...]
     shape = list(seq.shape)
     shape[1] = shape[1] + 1
     tmp = np.zeros(shape, dtype = seq.dtype)
@@ -356,7 +391,7 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
         ######################################
         # Merge tables for different channels
         # 
-        merged = pd.merge(tmp[0], tmp[1], how = "outer",on=('label','timepoint'))
+        merged = pd.merge(tmp[0], tmp[1], how = "outer", on=('label','timepoint'))
         
         ################################################################
         # Determine location of each cell (egg chamber or background)
@@ -367,6 +402,7 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
         props_mask = ('label', 'max_intensity')
         measure_frame_mask = partial(measure_frame, props=props_mask)
         measure_mask = np.array(list(p.map(measure_frame_mask, zip(labels, repeat(chamber_labels) , objects_seq))))
+    
     # add egg chamber label as column to merged data frame
     merged = merged.assign(eggchamber=pd.concat(map(pd.DataFrame, measure_mask))["max_intensity"].astype(np.int).values)
     merged["filename"] = input_tif
@@ -379,21 +415,10 @@ def process_timeseries(input_tif: str, metadata: Dict, output_csv = Optional[str
         area_pixels=np.sum(chamber_labels==chamber)
         chamber_sizes[chamber]=area_pixels
     merged["chamberarea"] = merged["eggchamber"].apply(lambda x: chamber_sizes[x])
-        
 
-    ##########################
-    # Create overlays
-    ##########################
-
-    #create_RGB_sequence()
-    result = {"measurements" : merged, "seq" : seq, "cell_label_seq": labels, "chamber_labels": chamber_labels }
-    return result
+    # TODO:
     # add 'metadata' to each dict
 
-    
-
-    # generate output_csv filename from input filename unless provided
-    # write csv
-    # generate output_overlay filename/s from overlay filename unless provided
-    # write image series (png/jpg)
-    # return 
+    result = {"measurements" : merged, "seq" : seq, "cell_label_seq": labels, "chamber_labels": chamber_labels }
+    return result
+ 
