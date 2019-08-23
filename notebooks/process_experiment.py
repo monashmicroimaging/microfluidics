@@ -17,6 +17,7 @@ from scipy.ndimage import find_objects
 from concurrent.futures import ThreadPoolExecutor
 from itertools import product, repeat
 import pandas as pd
+from bidict import bidict
 from cv2 import VideoWriter, VideoWriter_fourcc
 
 
@@ -197,6 +198,7 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, open_di
     # in the future for multithreaded performance. 
     # More elegant suggestions welcome. 
     with ThreadPoolExecutor() as p:
+        res = list(p.map(process_frame, range(dapiseq.shape[0])))
     return labels, masks
 
 def process_measurements(measurements, fluo_channels):
@@ -207,6 +209,7 @@ def process_measurements(measurements, fluo_channels):
     Reslt is a list of dataframes, one per channel.
     """
     outer = []
+    dont_rename = ("timepoint", "label", "area", "centroid-0", "centroid-1")
     for ch_number, ch_measurements in zip(fluo_channels, measurements):
         inner = []
         for i,m in enumerate(ch_measurements):
@@ -214,38 +217,48 @@ def process_measurements(measurements, fluo_channels):
             tmp["timepoint"] = i
             inner.append(tmp)
         ch_df = pd.concat(inner)
-        ch_df = ch_df.rename(columns = lambda cname: cname  if cname in  ("timepoint", "label") else f"ch_{ch_number}_{cname}")
+        ch_df = ch_df.rename(columns = lambda cname: cname  if cname in dont_rename  else f"ch_{ch_number}_{cname}")
         outer.append(ch_df)
     return outer # Should the data frame merging happen here ? (Currently in calling function)
     
-def process_timeseries(input_tif: str, metadata, output_csv: Optional[str]=None, output_overlay: Optional[str]=None):
+def process_timeseries(input_tif: str, channeldict: dict, output_overlay: Optional[str]=None):
     """Process a single time series, write measurements to csv and overlay to MP4 
        
        Parameters
         ----------
        input_tif: [str], str with path to input tifffile.
-       metadata: [dict] ? metadate from the corresponding nd2 file
-       output_csv : [str], optional
+       channeldict: [dict]  metadate from the corresponding nd2 file
        file name for the output csv file, will be generated automatically based on input_tif if None
        output_overlay : [str], optional
        file name for the segmentation results,  will be generated automatically based on input_tif if None
     """
 
+    
+    bf_ch = channeldict["brightfield"]
+    dapi_ch = channeldict["dapi"]
+    green_ch = channeldict["green"]
+    red_ch = channeldict["red"]
+
     #########################
     # Call actual processing
     #########################
     print("Drift correction, circle detection and cell segmentation")
-    results = segment_and_measure_timeseries(input_tif, {})
+    results = segment_and_measure_timeseries(input_tif, channeldict)
 
     ####################
     # Save measurements
     ####################
     print("Saving csv")
-    if output_csv is None:
-        output_csv=input_tif.replace(".tif",".csv")
-    df = results["measurements"]
-    print(f"Saving measurements as {output_csv}")
-    df.to_csv(output_csv) #TODO catch PermissionError  and what else?
+    output_csv_cells=input_tif.replace(".tif","_cells.csv")
+    output_csv_chambers=input_tif.replace(".tif","_chambers.csv")
+
+    df = results["cell_measurements"]
+    print(f"Saving cell measurements as {output_csv_cells}")
+    df.to_csv(output_csv_cells) 
+
+    df = results["chamber_measurements"]
+    print(f"Saving chamber measurements as {output_csv_chambers}")
+    df.to_csv(output_csv_chambers) 
 
     ######################################
     # Create and save segemenation overlay
@@ -255,8 +268,8 @@ def process_timeseries(input_tif: str, metadata, output_csv: Optional[str]=None,
     
     # rescale intensities
     # TODO: extract from metadata and remove this section
-    bf_ch=1 
-    dapi_ch=0
+
+
     bf_seq = rescale_intensity(results["seq"][:,bf_ch,...] ,out_range=np.uint8).astype(np.uint8)
     dapi_seq = rescale_intensity(results["seq"][:,dapi_ch,...], out_range=np.uint8).astype(np.uint8)
     label_seq = results["cell_label_seq"]
@@ -284,17 +297,19 @@ def measure_chamber_intensity(chamber_labels: np.ndarray, seq: np.ndarray, fluo_
 
     props_intensity = ('label', 'centroid', 'max_intensity', 'mean_intensity', 'min_intensity', 'area')
     
-    def _measure_frame(intensity, props):
+    def _measure_frame(intensity):
         return regionprops_table(chamber_labels, intensity, properties=props_intensity)
 
-    print   ("Calculating chamber intensity statistics")
+    print("Calculating chamber intensity statistics ...")
     measurements=[]
-    for ch in fluo_channels:   
-        with ThreadPoolExecutor() as p: 
-            measurements_intensity = np.array(list(p.map(measure_ch, seq[:,ch, ... ])))
+    with ThreadPoolExecutor() as p: 
+        for ch in fluo_channels:
+             print(f"measuring intensity in ch {ch}")
+             measurements_intensity = np.array(list(p.map(_measure_frame, seq[:,ch, ... ])))
+             measurements.append(measurements_intensity)
+    return measurements
 
-
-def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3):
+def segment_and_measure_timeseries(input_tif: str, channeldict: Dict, sigma: int=3):
     """Provided an input image sequence correspoding to a time series at a given position perform
     egg chamber detection/segmentation/ 
 
@@ -303,11 +318,22 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
     ----------
     input_tif : str
         input filename
-    metadata : Dict
-        dictionary that contains metadata which should be added to output table
-   
+    channelinfo : Dict
+        dictionary that contains metadata about the channels present
     sigma: [int]: 
         passed on to gaussian smoothing
+
+
+    example channelinfo dictionary:
+
+        {   
+         "dapi": 0
+         "brightfield": 1
+         "green": 2
+         "red": -1
+        }
+
+    i.e. key is one of "dapi", "brightfield", "green", "red". value is the channel number, -1 if not present in experiment
     """
     
     seq = tifffile.imread(input_tif)
@@ -321,6 +347,7 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
     # for debugging only ... create an additional fluorescence channel by copying dapi
     # this is because I don't have a suitbale multi-channel image on my laptop
     #seq = seq[:40,...]
+    seq = seq[:10,...]
     shape = list(seq.shape)
     shape[1] = shape[1] + 1
     tmp = np.zeros(shape, dtype = seq.dtype)
@@ -329,18 +356,12 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
             tmp[i, j, ... ] = seq[i,j,...]
         tmp[i,2] = seq[i,1,...]
     seq=tmp.copy()
-
-    # determine channels based on metadata
-    # fill in later 
-    # we definitely need DAPI channel for nuclei and brightfield 
-    # for egg chambers
-
-    ch_dapi = 0
-    ch_bf = 1
-
-    # TODO: swap dimensions as necessary (according to metadata np.)
-    # assume from here on that we have the dimension order
-    # from here onwards (t, ch, y, x)
+    
+    print(f"ChannelDict is {channeldict}")
+    ch_bf = channeldict["brightfield"]
+    ch_dapi = channeldict["dapi"]
+    ch_green = channeldict["green"]
+    ch_red = channeldict["red"]
 
     # Drift correction of sequence
     shifts = stabilize_getshifts(seq[:, ch_bf, ...])
@@ -381,22 +402,21 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
         #
         print("segmeting nuclei ...")
         bg_corr_dapi = bg_corr[fluo_channels.index(ch_dapi)]
-        #for i, tmpim  in enumerate(bg_corr_dapi):
-        #    print(f"bg_corr_dapi {i}")
-        #    plt.imshow(tmpim)
-        #    plt.show()
         labels, bg_mask = segment_cells(bg_corr_dapi)
-        #labels, bg_mask = segment_cells(seq[:,ch_bf,...])
-
-
 
         #################################################
-        # Per-frame refinemant of background subtraction, 
+        # Per-frame refinement of background subtraction, 
         # 
         # (for each frame, remove
         # median intensity in background mask).
         # After this, the median intensity of the background
         # is 0 by construction.
+        #
+        # CAVEAT: only use the refined estimate for measuring per-cell
+        #         intensity statistics.
+        #         The green channel has bacteria which are outside of 
+        #         the cells (therefore inensity is measured in the whole
+        #         egg chamber) ... only use the original
         print("refining background correction estimation")
         def correct_frame(intuple):
             frame, mask = intuple
@@ -406,7 +426,7 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
         bg_corr_refined = list(p.map(correct_ch, bg_corr))
         
         ############################################################################
-        # Feature extraction : measure intensity statistics in fluorescence channels
+        # Measurements : measure per-cell intensity statistics in fluorescence channels
         # 
         # TODO: add other metrics as needed (e.g. std deviation)
         print("Calculating intensity statistics for cells")
@@ -435,23 +455,35 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
         props_mask = ('label', 'max_intensity')
         measure_frame_mask = partial(measure_frame, props=props_mask)
         measure_mask = np.array(list(p.map(measure_frame_mask, zip(labels, repeat(chamber_labels) , objects_seq))))
-    
-    # add egg chamber label as column to merged data frame
-    merged = merged.assign(eggchamber=pd.concat(map(pd.DataFrame, measure_mask))["max_intensity"].astype(np.int).values)
-    merged["filename"] = input_tif
-    # add area in pixels for each egg chamber
-    # as we know the approximate radius and area of each chamber
-    # this will allow filtering for egg chambers that are only partially in
-    # the field of view
-    chamber_sizes = {} # build a dictionary to help translate between chamber label and area
-    for chamber in merged["eggchamber"].unique():   
-        area_pixels=np.sum(chamber_labels==chamber)
-        chamber_sizes[chamber]=area_pixels
-    merged["chamberarea"] = merged["eggchamber"].apply(lambda x: chamber_sizes[x])
+        
+        # add egg chamber label as column to merged data frame
+        merged = merged.assign(eggchamber=pd.concat(map(pd.DataFrame, measure_mask))["max_intensity"].astype(np.int).values)
+        merged["filename"] = input_tif
+        # add area in pixels for each egg chamber
+        # as we know the approximate radius and area of each chamber
+        # this will allow filtering for egg chambers that are only partially in
+        # the field of view
+        chamber_sizes = {} # build a dictionary to help translate between chamber label and area
+        for chamber in merged["eggchamber"].unique():   
+            area_pixels=np.sum(chamber_labels==chamber)
+            chamber_sizes[chamber]=area_pixels
+        merged["chamberarea"] = merged["eggchamber"].apply(lambda x: chamber_sizes[x])
+
+        ########################################################
+        # Measure green channel intensity in egg chambers 
+        # over time, if green channel is present
+        # 
+
+        chamber_df=None
+        if ch_green != -1:
+            m_chambers = measure_chamber_intensity(chamber_labels, seq , [ch_green])
+            chamber_df = process_measurements(m_chambers, [ch_green])[0]
+            chamber_df = chamber_df.rename(columns = {"label":"egg_chamber"})
+
 
     # TODO:
     # add 'metadata' to each dict
 
-    result = {"measurements" : merged, "seq" : seq, "cell_label_seq": labels, "chamber_labels": chamber_labels , "bg_corr": bg_corr   }
+    result = {"cell_measurements" : merged, "chamber_measurements":chamber_df, "seq" : seq, "cell_label_seq": labels, "chamber_labels": chamber_labels , "bg_corr": bg_corr  }
     return result
  
