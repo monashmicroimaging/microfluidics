@@ -6,9 +6,9 @@ from stabilize_sequence import stabilize_getshifts, stabilize_apply_shifts, stab
 from detect_and_label_chambers import detect_circles
 from skimage.measure import label, regionprops_table
 from skimage.color import label2rgb
-from skimage.filters import gaussian, threshold_otsu, threshold_li
+from skimage.filters import gaussian, threshold_otsu, threshold_li, threshold_triangle
 from skimage.exposure import rescale_intensity
-from skimage.morphology import dilation, erosion, disk
+from skimage.morphology import dilation, erosion, disk, square,   opening, remove_small_holes, remove_small_objects
 from skimage.color import gray2rgb
 from skimage.exposure import rescale_intensity
 from typing import Dict, Optional, Tuple
@@ -148,42 +148,44 @@ def subtract_mask_median_bg(seq: np.ndarray, mask: np.ndarray) -> np.ndarray:
     subtracted_frames = map(lambda frame: frame-np.median(frame[mask], seq))
     return np.array(list(subtracted_frames))
 
-def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_by: int=20) -> Tuple[np.ndarray, np.ndarray]:
+def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, open_diam: int=2, min_size: int=14, max_holesize: int=25, dilate_by: int=20) -> Tuple[np.ndarray, np.ndarray]:
     """given a time series of dapi images, calculate labels and background mask
     
     Arguments:
         dapiseq {np.ndarray} -- dapi image sequence()
         min_tresh {float} -- optional, minimum threshold. 
+        open_diam (int) -- diameter of greyvalue opening before thresholding (removes isolated noise pixels)
+        min_size (int) -- minimum size per object in pixels. Smaller objects are filtered out
+        mmax_holesize (int) -- holes within objects up to an area of max_holesize pixels will be filled
         dilate_by {int} -- how much to dilate the nuclei to determine the background mask
     Returns:
         Tuple[np.ndarray, np.ndarray] -- (label sequence, background mask sequence)
 
-    Segmentation is performed using otsu thresholding for each time point, using the larger of 
-    the determined otsu threshold or min_thresh. The segmented regions are labelled. 
-    Also the nuclei areas will be dilated and then inverted to create a mask of the background.
-    The resulting label sequence and background mask binary sequence are returned as a tuple
+    Segmentation is performed using triangle thresholding for each time point, using the larger of 
+    the determined triangle threshold or min_thresh. Small objects are removed and small holes in the remainig objects
+    are filled before the segmented regions are labelled. 
+    In addition to finding the cells the nuclei regions are dilated and then inverted to create a binary mask of the background.
+    The resulting label and background mask sequences are returned as a tuple.
     """
     labels = np.zeros(dapiseq.shape, dtype=np.uint16)
     masks = np.zeros(dapiseq.shape, dtype=np.bool)
     def process_frame(i):
         frame = dapiseq[i, ...]
         # frame = gaussian(frame, 3)
-        # plt.imshow(frame)
-        # plt.show()
-        th = threshold_otsu(frame)
-        # alternative suggested by @jni
-        #initial_guess= np.quantile(frame, 0.99)
-        #th  = threshold_li(frame, initial_guess=initial_guess)
+        frame = opening(frame, square(open_diam))
+        th = threshold_triangle(frame)
         if min_thresh is not None:
             th = max(th, min_thresh)
         # print(f"threshold for frame {i} is {th}") # debug code
         cellmask = frame > th 
+        cellmask = remove_small_holes(cellmask, min_size)
+        cellmask = remove_small_objects(cellmask, max_holesize)
         #plt.imshow(cellmask) # debug code
         #plt.show()
         dilated_mask = dilation(cellmask, disk(dilate_by))
         bg = ~dilated_mask
-        # TODO see whether we observe
-        # any clumping and implement distance-transform-based splitting
+        # TODO analyse a few more sequences see whether we observe
+        # significant clumping. Implement distance-transform-based splitting
         # if necessary
         labelled_frame = label(cellmask)
         labels[i, ...] = labelled_frame
@@ -195,7 +197,6 @@ def segment_cells(dapiseq: np.ndarray, min_thresh: Optional[float]=None, dilate_
     # in the future for multithreaded performance. 
     # More elegant suggestions welcome. 
     with ThreadPoolExecutor() as p:
-        res = list(p.map(process_frame, range(dapiseq.shape[0])))
     return labels, masks
 
 def process_measurements(measurements, fluo_channels):
@@ -264,6 +265,34 @@ def process_timeseries(input_tif: str, metadata, output_csv: Optional[str]=None,
     save_seq_as_avi(overlay, output_overlay)
 
     return results # pass results up, useful when using notebook
+
+
+def measure_chamber_intensity(chamber_labels: np.ndarray, seq: np.ndarray, fluo_channels) -> pd.DataFrame:
+    """Measure fluorescence intensity in whole chamber area
+    
+    Arguments:
+        chamber_labels {np.ndarray} -- 2D array with labeled chamber regions
+        seq {np.ndarray} -- [t,c,y,x] image sequence in which to measure intensity
+        fluo_channels {[type]} -- list of fluorescence channel indices in which the chamber
+                                  intensity is to be measured. 
+    
+    Returns:
+        pd.DataFrame -- data frame with measurements, one per timepoint
+    """
+
+    # TODO: how to add metadata columns such as 
+
+    props_intensity = ('label', 'centroid', 'max_intensity', 'mean_intensity', 'min_intensity', 'area')
+    
+    def _measure_frame(intensity, props):
+        return regionprops_table(chamber_labels, intensity, properties=props_intensity)
+
+    print   ("Calculating chamber intensity statistics")
+    measurements=[]
+    for ch in fluo_channels:   
+        with ThreadPoolExecutor() as p: 
+            measurements_intensity = np.array(list(p.map(measure_ch, seq[:,ch, ... ])))
+
 
 def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3):
     """Provided an input image sequence correspoding to a time series at a given position perform
@@ -344,7 +373,8 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
         #  Initial Background Estimation
         # 
         print("performing initial background correction")
-        bg_corr = list(p.map(lambda ch: gaussian(seq[:, ch, ...],sigma) - bg_estimate_initial(seq[:,ch,...], sigma), fluo_channels))
+        #bg_corr = list(p.map(lambda ch: gaussian(seq[:, ch, ...],sigma) - bg_estimate_initial(seq[:,ch,...], sigma), fluo_channels))
+        bg_corr = list(p.map(lambda ch: seq[:, ch, ...] - bg_estimate_initial(seq[:,ch,...], sigma), fluo_channels))
 
         ################################
         # Segment Nuclei in DAPI channel
@@ -356,6 +386,9 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
         #    plt.imshow(tmpim)
         #    plt.show()
         labels, bg_mask = segment_cells(bg_corr_dapi)
+        #labels, bg_mask = segment_cells(seq[:,ch_bf,...])
+
+
 
         #################################################
         # Per-frame refinemant of background subtraction, 
@@ -376,7 +409,7 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
         # Feature extraction : measure intensity statistics in fluorescence channels
         # 
         # TODO: add other metrics as needed (e.g. std deviation)
-        print("Calculating intensity statistics")
+        print("Calculating intensity statistics for cells")
         props_intensity = ('label', 'centroid', 'max_intensity', 'mean_intensity', 'min_intensity', 'area')
         objects_seq = list(map(find_objects, labels)) # we want to re-use the objects for each ch
         def measure_frame(intuple, props):
@@ -419,6 +452,6 @@ def segment_and_measure_timeseries(input_tif: str, metadata: Dict, sigma: int=3)
     # TODO:
     # add 'metadata' to each dict
 
-    result = {"measurements" : merged, "seq" : seq, "cell_label_seq": labels, "chamber_labels": chamber_labels }
+    result = {"measurements" : merged, "seq" : seq, "cell_label_seq": labels, "chamber_labels": chamber_labels , "bg_corr": bg_corr   }
     return result
  
