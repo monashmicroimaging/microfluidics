@@ -12,7 +12,7 @@ from skimage.morphology import dilation, erosion, disk, square,   opening, remov
 from skimage.color import gray2rgb
 from skimage.exposure import rescale_intensity
 from typing import Dict, Optional, Tuple
-from functools import partial
+from functools import partial, reduce
 from scipy.ndimage import find_objects
 from concurrent.futures import ThreadPoolExecutor
 from itertools import product, repeat
@@ -239,6 +239,14 @@ def process_timeseries(input_tif: str, channeldict: dict, output_overlay: Option
     green_ch = channeldict["green"]
     red_ch = channeldict["red"]
 
+    if bf_ch == -1 or dapi_ch == -1:
+        print("need at least DAPI and Brightfield channels for processing")
+        return None
+
+    for k in channeldict.keys():
+        if channeldict[k] > -1:
+            print(f"{k} channel is {channeldict[k]}")
+
     #########################
     # Call actual processing
     #########################
@@ -253,12 +261,18 @@ def process_timeseries(input_tif: str, channeldict: dict, output_overlay: Option
     output_csv_chambers=input_tif.replace(".tif","_chambers.csv")
 
     df = results["cell_measurements"]
-    print(f"Saving cell measurements as {output_csv_cells}")
-    df.to_csv(output_csv_cells) 
+    if df is not None:
+        print(f"Saving cell measurements as {output_csv_cells}")
+        df.to_csv(output_csv_cells) 
+    else:
+        print("no cell measuerements")
 
     df = results["chamber_measurements"]
-    print(f"Saving chamber measurements as {output_csv_chambers}")
-    df.to_csv(output_csv_chambers) 
+    if df is not None:
+        print(f"Saving chamber measurements as {output_csv_chambers}")
+        df.to_csv(output_csv_chambers)
+    else:
+        print("no chamber measurements")
 
     ######################################
     # Create and save segemenation overlay
@@ -268,7 +282,6 @@ def process_timeseries(input_tif: str, channeldict: dict, output_overlay: Option
     
     # rescale intensities
     # TODO: extract from metadata and remove this section
-
 
     bf_seq = rescale_intensity(results["seq"][:,bf_ch,...] ,out_range=np.uint8).astype(np.uint8)
     dapi_seq = rescale_intensity(results["seq"][:,dapi_ch,...], out_range=np.uint8).astype(np.uint8)
@@ -347,24 +360,35 @@ def segment_and_measure_timeseries(input_tif: str, channeldict: Dict, sigma: int
     # for debugging only ... create an additional fluorescence channel by copying dapi
     # this is because I don't have a suitbale multi-channel image on my laptop
     #seq = seq[:40,...]
-    seq = seq[:10,...]
+    #seq = seq[:10,...]
     shape = list(seq.shape)
-    shape[1] = shape[1] + 1
-    tmp = np.zeros(shape, dtype = seq.dtype)
-    for i in range(shape[0]):
-        for j in (0,1):
-            tmp[i, j, ... ] = seq[i,j,...]
-        tmp[i,2] = seq[i,1,...]
-    seq=tmp.copy()
-    
+    #shape[1] = shape[1] + 1
+    #tmp = np.zeros(shape, dtype = seq.dtype)
+    #for i in range(shape[0]):
+    #    for j in (0,1):
+    #        tmp[i, j, ... ] = seq[i,j,...]
+    #    tmp[i,2] = seq[i,1,...]
+    #seq=tmp.copy()
+    #seq = seq[:5,...]
+
     print(f"ChannelDict is {channeldict}")
     ch_bf = channeldict["brightfield"]
     ch_dapi = channeldict["dapi"]
     ch_green = channeldict["green"]
     ch_red = channeldict["red"]
 
+    all_channels = []
+    for ch in ["brightfield", "dapi", "red", "green"]:
+        if channeldict[ch] > -1:
+            all_channels.append(channeldict[ch])
+    fluo_channels = []
+    for ch in ["dapi", "red", "green"]:
+        if channeldict[ch] > -1:
+            fluo_channels.append(channeldict[ch])
+
     # Drift correction of sequence
     shifts = stabilize_getshifts(seq[:, ch_bf, ...])
+    print(shifts)
     seq = stabilize_apply_shifts(seq, shifts)
     seq = stabilize_crop_to_overlap(seq)
 
@@ -377,14 +401,14 @@ def segment_and_measure_timeseries(input_tif: str, channeldict: Dict, sigma: int
     bf_median = np.median(seq[:,ch_bf,...], axis=0)
     chamber_labels = detect_circles(bf_median)
 
-    plt.imshow(chamber_labels)
-    plt.show()
+    #plt.imshow(chamber_labels)
+    #plt.show()
 
     # first round of background subtraction
     # apply to all fluorescence channels
 
-    all_channels = tuple(range(seq.shape[1]))
-    fluo_channels = tuple(set(all_channels) - set([ch_bf]))
+    if len(all_channels) != seq.shape[1]:
+        print("Number of channels doesn't match with experiment description")
 
     print(f"all channes {all_channels}")
     print(f"fluo channels {fluo_channels}")
@@ -395,6 +419,7 @@ def segment_and_measure_timeseries(input_tif: str, channeldict: Dict, sigma: int
         # 
         print("performing initial background correction")
         #bg_corr = list(p.map(lambda ch: gaussian(seq[:, ch, ...],sigma) - bg_estimate_initial(seq[:,ch,...], sigma), fluo_channels))
+        print(f"seq.shape {seq.shape}, fluo_ch  {fluo_channels}",)
         bg_corr = list(p.map(lambda ch: seq[:, ch, ...] - bg_estimate_initial(seq[:,ch,...], sigma), fluo_channels))
 
         ################################
@@ -444,8 +469,17 @@ def segment_and_measure_timeseries(input_tif: str, channeldict: Dict, sigma: int
         ######################################
         # Merge tables for different channels
         # 
-        merged = pd.merge(tmp[0], tmp[1], how = "outer", on=('label','timepoint'))
+        #merged = pd.merge(tmp[0], tmp[1], how = "outer", on=('label','timepoint'))
         
+        if len(tmp) > 1:
+            # merge dataframes:
+            merged = reduce(lambda left, right:  pd.merge(left, right, how = "outer", on=('label','timepoint')), tmp)
+        elif len(tmp) == 1:
+            merged = tmp[0]
+        else:
+            print("no dataframe to merge !!!")
+            merged = None
+
         ################################################################
         # Determine location of each cell (egg chamber or background)
         #
